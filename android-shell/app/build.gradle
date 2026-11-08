@@ -6,6 +6,27 @@ plugins {
 // 签名：CI 里通过环境变量注入 keystore（见 android-shell/README.md）；
 // 没有配置时 release 构建产出未签名 APK，debug 构建始终可直接安装测试。
 def ksFile = System.getenv("SHELL_KEYSTORE_FILE")
+
+// CI 里 SHELL_KEYSTORE_BASE64 配错（二次 base64、被截断、带引号）时，
+// 解码出来的是文本，构建会一路跑到 packageDebug 才以 KeytoolException
+// 失败，报错看不出真正原因。在配置阶段校验文件头——JKS 魔数 FE ED FE ED、
+// PKCS12 DER 头 30 82——不匹配就立刻给出可操作的报错。
+if (ksFile) {
+    def f = file(ksFile)
+    if (!f.isFile()) {
+        throw new GradleException("SHELL_KEYSTORE_FILE 指向的文件不存在：${ksFile}")
+    }
+    def head = new byte[2]
+    f.withInputStream { it.read(head, 0, 2) }
+    def magic = head.encodeHex().toString()
+    if (magic != 'feed' && magic != '3082') {
+        throw new GradleException(
+            "SHELL_KEYSTORE_FILE 指向的 ${ksFile} 不是有效的 JKS/PKCS12 keystore（文件头 ${magic}）。\n" +
+            "通常是 SHELL_KEYSTORE_BASE64 配错：二次 base64、被截断或带了引号。\n" +
+            "请重新生成：base64 -w0 shell.keystore（macOS: base64 -b0 shell.keystore），" +
+            "输出整体覆盖该 secret，不要二次编码、不要加引号。")
+    }
+}
 def siteUrl = (System.getenv("SHELL_SITE_URL") ?: "https://example.invalid").replaceAll('/+$', '')
 
 android {
