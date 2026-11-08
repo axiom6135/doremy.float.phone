@@ -29,21 +29,36 @@ if (ksFile) {
         def src = java.security.KeyStore.getInstance('JKS')
         try {
             f.withInputStream { src.load(it, ksStorePass?.toCharArray()) }
-        } catch (Exception e) {
+        } catch (java.io.EOFException e) {
             // JKS 是自描述长度格式：文件头正确但提前结束只会是截断，
             // 典型成因是 base64 只粘贴了一部分（例如多行输出只复制了首行）。
             throw new GradleException(
                 "SHELL_KEYSTORE_FILE 指向的 ${ksFile} 是截断的 JKS keystore" +
-                "（大小 ${f.length()} 字节，解析失败：${e.getClass().simpleName}）。\n" +
+                "（大小 ${f.length()} 字节）。\n" +
                 "说明 SHELL_KEYSTORE_BASE64 解码出来的内容不完整。\n" +
                 "请重新生成并整体覆盖该 secret：base64 -w0 shell.keystore" +
                 "（macOS 用 base64 -b0，单行输出），确认解码后文件大小与原始 keystore 一致。")
+        } catch (java.io.IOException e) {
+            throw new GradleException(
+                "无法打开 ${ksFile}：${e.message}\n" +
+                "文件头正常，通常是 SHELL_KEYSTORE_PASSWORD 与 keystore 不匹配。")
+        }
+        if (!src.containsAlias(ksKeyAlias)) {
+            throw new GradleException(
+                "keystore 中不存在别名 ${ksKeyAlias}，实际别名：${src.aliases().toList().join(', ')}。\n" +
+                "请把 SHELL_KEY_ALIAS 改成上面列出的某个别名。")
         }
         def dst = java.security.KeyStore.getInstance('PKCS12')
         dst.load(null, null)
-        dst.setKeyEntry(ksKeyAlias,
-                src.getKey(ksKeyAlias, (ksKeyPass ?: ksStorePass)?.toCharArray()),
-                ksStorePass?.toCharArray(),
+        def key
+        try {
+            key = src.getKey(ksKeyAlias, (ksKeyPass ?: ksStorePass)?.toCharArray())
+        } catch (java.security.UnrecoverableKeyException e) {
+            throw new GradleException(
+                "无法用 SHELL_KEY_PASSWORD 解出别名 ${ksKeyAlias} 的私钥。\n" +
+                "请确认 SHELL_KEY_PASSWORD 正确（JKS 里 key 密码可以和 store 密码不同）。")
+        }
+        dst.setKeyEntry(ksKeyAlias, key, ksStorePass?.toCharArray(),
                 src.getCertificateChain(ksKeyAlias))
         def out = new File(layout.buildDirectory.get().asFile, 'shell-signing.p12')
         out.parentFile.mkdirs()
