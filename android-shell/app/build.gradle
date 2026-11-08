@@ -6,11 +6,17 @@ plugins {
 // 签名：CI 里通过环境变量注入 keystore（见 android-shell/README.md）；
 // 没有配置时 release 构建产出未签名 APK，debug 构建始终可直接安装测试。
 def ksFile = System.getenv("SHELL_KEYSTORE_FILE")
+def ksStorePass = System.getenv("SHELL_KEYSTORE_PASSWORD")
+def ksKeyAlias = System.getenv("SHELL_KEY_ALIAS")
+def ksKeyPass = System.getenv("SHELL_KEY_PASSWORD")
 
-// CI 里 SHELL_KEYSTORE_BASE64 配错（二次 base64、被截断、带引号）时，
-// 解码出来的是文本，构建会一路跑到 packageDebug 才以 KeytoolException
-// 失败，报错看不出真正原因。在配置阶段校验文件头——JKS 魔数 FE ED FE ED、
-// PKCS12 DER 头 30 82——不匹配就立刻给出可操作的报错。
+// AGP 的 signingConfig 没有 storeType 选项，keystore 一律按 JDK 默认的
+// PKCS12 解析。喂给它 JKS 时会到打包才炸：KeytoolException:
+// DerInputStream.getLength(): lengthTag=109——0xED 正是 JKS 魔数
+// FE ED FE ED 的第二个字节被当成了 DER 长度。所以在配置阶段按文件头分流：
+// JKS 先在内存里转成 PKCS12（写到 build 目录）再交给 AGP；
+// 文件头既不是 JKS 也不是 PKCS12（secret 二次 base64/截断/带引号，解码出
+// 文本）就直接抛错，别等到 packageDebug。
 if (ksFile) {
     def f = file(ksFile)
     if (!f.isFile()) {
@@ -19,7 +25,22 @@ if (ksFile) {
     def head = new byte[2]
     f.withInputStream { it.read(head, 0, 2) }
     def magic = head.encodeHex().toString()
-    if (magic != 'feed' && magic != '3082') {
+    if (magic == 'feed') {
+        def src = java.security.KeyStore.getInstance('JKS')
+        f.withInputStream { src.load(it, ksStorePass?.toCharArray()) }
+        def dst = java.security.KeyStore.getInstance('PKCS12')
+        dst.load(null, null)
+        dst.setKeyEntry(ksKeyAlias,
+                src.getKey(ksKeyAlias, (ksKeyPass ?: ksStorePass)?.toCharArray()),
+                ksStorePass?.toCharArray(),
+                src.getCertificateChain(ksKeyAlias))
+        def out = new File(layout.buildDirectory.get().asFile, 'shell-signing.p12')
+        out.parentFile.mkdirs()
+        out.withOutputStream { dst.store(it, ksStorePass?.toCharArray()) }
+        ksFile = out.absolutePath
+        // PKCS12 的 key 密码必须与 store 密码一致
+        ksKeyPass = ksStorePass
+    } else if (magic != '3082') {
         throw new GradleException(
             "SHELL_KEYSTORE_FILE 指向的 ${ksFile} 不是有效的 JKS/PKCS12 keystore（文件头 ${magic}）。\n" +
             "通常是 SHELL_KEYSTORE_BASE64 配错：二次 base64、被截断或带了引号。\n" +
@@ -73,9 +94,9 @@ android {
         signingConfigs {
             release {
                 storeFile file(ksFile)
-                storePassword System.getenv("SHELL_KEYSTORE_PASSWORD")
-                keyAlias System.getenv("SHELL_KEY_ALIAS")
-                keyPassword System.getenv("SHELL_KEY_PASSWORD")
+                storePassword ksStorePass
+                keyAlias ksKeyAlias
+                keyPassword ksKeyPass
             }
         }
     }
