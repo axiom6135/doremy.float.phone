@@ -27,7 +27,18 @@ if (ksFile) {
     def magic = head.encodeHex().toString()
     if (magic == 'feed') {
         def src = java.security.KeyStore.getInstance('JKS')
-        f.withInputStream { src.load(it, ksStorePass?.toCharArray()) }
+        try {
+            f.withInputStream { src.load(it, ksStorePass?.toCharArray()) }
+        } catch (Exception e) {
+            // JKS 是自描述长度格式：文件头正确但提前结束只会是截断，
+            // 典型成因是 base64 只粘贴了一部分（例如多行输出只复制了首行）。
+            throw new GradleException(
+                "SHELL_KEYSTORE_FILE 指向的 ${ksFile} 是截断的 JKS keystore" +
+                "（大小 ${f.length()} 字节，解析失败：${e.getClass().simpleName}）。\n" +
+                "说明 SHELL_KEYSTORE_BASE64 解码出来的内容不完整。\n" +
+                "请重新生成并整体覆盖该 secret：base64 -w0 shell.keystore" +
+                "（macOS 用 base64 -b0，单行输出），确认解码后文件大小与原始 keystore 一致。")
+        }
         def dst = java.security.KeyStore.getInstance('PKCS12')
         dst.load(null, null)
         dst.setKeyEntry(ksKeyAlias,
